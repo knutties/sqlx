@@ -5,6 +5,7 @@ use std::time::Instant;
 use futures_core::future::BoxFuture;
 
 pub(crate) use sqlx_core::migrate::MigrateError;
+pub(crate) use sqlx_core::migrate::{append_hex, append_sql_string, MigrateRender};
 pub(crate) use sqlx_core::migrate::{AppliedMigration, Migration};
 pub(crate) use sqlx_core::migrate::{Migrate, MigrateDatabase};
 use sqlx_core::sql_str::AssertSqlSafe;
@@ -309,6 +310,36 @@ CREATE TABLE IF NOT EXISTS {table_name} (
             .await?;
             Ok(())
         })
+    }
+}
+
+impl MigrateRender for PgConnection {
+    fn append_apply_sql(&self, table_name: &str, migration: &Migration, buf: &mut String) {
+        use std::fmt::Write;
+
+        if !migration.no_tx {
+            buf.push_str("BEGIN;\n");
+        }
+
+        let sql = migration.sql.as_str();
+        buf.push_str(sql);
+        if !sql.ends_with('\n') {
+            buf.push('\n');
+        }
+
+        let _ = write!(
+            buf,
+            "INSERT INTO {table_name} ( version, description, success, checksum, execution_time ) VALUES ( {}, ",
+            migration.version
+        );
+        append_sql_string(buf, &migration.description);
+        buf.push_str(", TRUE, '\\x");
+        append_hex(buf, &migration.checksum);
+        buf.push_str("'::bytea, -1 );\n");
+
+        if !migration.no_tx {
+            buf.push_str("COMMIT;\n");
+        }
     }
 }
 

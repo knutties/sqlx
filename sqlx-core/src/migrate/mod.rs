@@ -4,6 +4,7 @@ mod migrate;
 mod migration;
 mod migration_type;
 mod migrator;
+mod render;
 mod source;
 
 pub use error::MigrateError;
@@ -11,7 +12,10 @@ pub use migrate::{Migrate, MigrateDatabase};
 pub use migration::{AppliedMigration, Migration};
 pub use migration_type::MigrationType;
 pub use migrator::Migrator;
+pub use render::MigrateRender;
 pub use source::{MigrationSource, ResolveConfig, ResolveWith};
 
+#[doc(hidden)]
+pub use render::{append_hex, append_sql_string};
 #[doc(hidden)]
 pub use source::{resolve_blocking, resolve_blocking_with_config};
