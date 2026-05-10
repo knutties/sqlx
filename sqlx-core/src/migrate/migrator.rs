@@ -1,7 +1,10 @@
 use crate::acquire::Acquire;
-use crate::migrate::{AppliedMigration, Migrate, MigrateError, Migration, MigrationSource};
+use crate::migrate::{
+    AppliedMigration, Migrate, MigrateError, MigrateRender, Migration, MigrationSource,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::ops::Deref;
 use std::slice;
 
@@ -374,6 +377,76 @@ impl Migrator {
         }
 
         Ok(pending)
+    }
+
+    /// Render pending migrations as a self-applying SQL script.
+    ///
+    /// Combines [`pending`](Self::pending) with [`MigrateRender::append_apply_sql`]
+    /// to produce SQL that an operator can review and apply via the database's own
+    /// client (`psql`, `mysql`, `sqlite3`). Each migration is preceded by a
+    /// `-- migration <version> (<description>)` comment for readability.
+    ///
+    /// The returned SQL is **self-applying**: executing it produces the same
+    /// post-state as [`run`](Self::run) (including the bookkeeping insert into
+    /// the migrations table), so a subsequent `run` sees those versions as already
+    /// applied and does not re-apply.
+    ///
+    /// Returns an empty string when there are no pending migrations. Returns the
+    /// same errors as [`pending`](Self::pending) ([`MigrateError::Dirty`],
+    /// [`MigrateError::VersionMismatch`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use sqlx::migrate::MigrateError;
+    /// # fn main() -> Result<(), MigrateError> {
+    /// #     sqlx::__rt::test_block_on(async move {
+    /// use sqlx::migrate::Migrator;
+    /// use sqlx::sqlite::SqlitePoolOptions;
+    ///
+    /// let m = Migrator::new(std::path::Path::new("./migrations")).await?;
+    /// let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await?;
+    /// let sql = m.render_pending_sql(&pool).await?;
+    /// if !sql.is_empty() {
+    ///     print!("{sql}");
+    /// }
+    /// # Ok(())
+    /// #     })
+    /// # }
+    /// ```
+    pub async fn render_pending_sql<'a, A>(&self, migrator: A) -> Result<String, MigrateError>
+    where
+        A: Acquire<'a>,
+        <A::Connection as Deref>::Target: Migrate + MigrateRender,
+    {
+        let mut conn = migrator.acquire().await?;
+        self.render_pending_sql_direct(&mut *conn).await
+    }
+
+    /// Like [`render_pending_sql`](Self::render_pending_sql) but takes a borrowed
+    /// connection directly. Mirrors [`run_direct`](Self::run_direct).
+    #[doc(hidden)]
+    pub async fn render_pending_sql_direct<C>(
+        &self,
+        conn: &mut C,
+    ) -> Result<String, MigrateError>
+    where
+        C: Migrate + MigrateRender,
+    {
+        let pending = self.pending_direct(conn).await?;
+
+        let mut buf = String::new();
+        for migration in pending {
+            let _ = writeln!(
+                buf,
+                "-- migration {} ({})",
+                migration.version, migration.description
+            );
+            conn.append_apply_sql(&self.table_name, migration, &mut buf);
+            buf.push('\n');
+        }
+
+        Ok(buf)
     }
 
     /// Run down migrations against the database until a specific version.

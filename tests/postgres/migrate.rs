@@ -1,6 +1,7 @@
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnection, Postgres};
+use sqlx::AssertSqlSafe;
 use sqlx::Executor;
 use sqlx::Row;
 use std::path::Path;
@@ -151,6 +152,32 @@ async fn pending(mut conn: PoolConnection<Postgres>) -> anyhow::Result<()> {
     // After run: nothing pending.
     migrator.run(&mut conn).await?;
     assert!(migrator.pending(&mut conn).await?.is_empty());
+
+    Ok(())
+}
+
+#[sqlx::test(migrations = false)]
+async fn render_pending_sql(mut conn: PoolConnection<Postgres>) -> anyhow::Result<()> {
+    clean_up(&mut conn).await?;
+
+    let migrator = Migrator::new(Path::new("tests/postgres/migrations_simple")).await?;
+
+    let sql = migrator.render_pending_sql(&mut conn).await?;
+    assert!(!sql.is_empty());
+    for migration in migrator.iter() {
+        let header = format!("-- migration {}", migration.version);
+        assert!(sql.contains(&header), "missing header for {header}");
+    }
+
+    // Apply the rendered script as raw SQL. After applying, `pending` must be
+    // empty — proving the script is self-applying (including bookkeeping rows).
+    conn.execute(sqlx::raw_sql(AssertSqlSafe(sql.clone()))).await?;
+    assert!(migrator.pending(&mut conn).await?.is_empty());
+
+    // `run` against the populated state must be a no-op (no checksum mismatch).
+    migrator.run(&mut conn).await?;
+
+    assert!(migrator.render_pending_sql(&mut conn).await?.is_empty());
 
     Ok(())
 }

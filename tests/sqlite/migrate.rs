@@ -1,6 +1,7 @@
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{Sqlite, SqliteConnection};
+use sqlx::AssertSqlSafe;
 use sqlx::Executor;
 use sqlx::Row;
 use std::path::Path;
@@ -166,6 +167,37 @@ async fn pending(mut conn: PoolConnection<Sqlite>) -> anyhow::Result<()> {
     // After run: nothing pending.
     migrator.run(&mut conn).await?;
     assert!(migrator.pending(&mut conn).await?.is_empty());
+
+    Ok(())
+}
+
+#[sqlx::test(migrations = false)]
+async fn render_pending_sql(mut conn: PoolConnection<Sqlite>) -> anyhow::Result<()> {
+    clean_up(&mut conn).await?;
+
+    let migrator = Migrator::new(Path::new("tests/sqlite/migrations_simple")).await?;
+
+    // Empty DB: rendered SQL contains a section for every migration, in order.
+    let sql = migrator.render_pending_sql(&mut conn).await?;
+    assert!(!sql.is_empty());
+    for migration in migrator.iter() {
+        let header = format!("-- migration {}", migration.version);
+        assert!(sql.contains(&header), "missing header for {header}");
+    }
+
+    // Apply the rendered script via raw SQL execution. Use a fresh connection
+    // since `Executor` consumes the rendered string. After applying, `pending`
+    // must report empty — proving the script is self-applying (including the
+    // `_sqlx_migrations` bookkeeping rows).
+    conn.execute(sqlx::raw_sql(AssertSqlSafe(sql.clone()))).await?;
+    assert!(migrator.pending(&mut conn).await?.is_empty());
+
+    // And `run` against the now-populated state must be a no-op (no checksum
+    // mismatch, no re-execution).
+    migrator.run(&mut conn).await?;
+
+    // Re-rendering with everything applied yields the empty string.
+    assert!(migrator.render_pending_sql(&mut conn).await?.is_empty());
 
     Ok(())
 }

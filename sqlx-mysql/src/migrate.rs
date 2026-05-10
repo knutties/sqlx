@@ -333,6 +333,43 @@ CREATE TABLE IF NOT EXISTS {table_name} (
     }
 }
 
+impl MigrateRender for MySqlConnection {
+    fn append_apply_sql(&self, table_name: &str, migration: &Migration, buf: &mut String) {
+        use std::fmt::Write;
+
+        // Mirror MySQL's apply() exactly: BEGIN, INSERT with success=FALSE, run the
+        // migration body, UPDATE success=TRUE, COMMIT. The two-step is needed because
+        // MySQL's DDL implicitly commits — the FALSE→TRUE flip lets sqlx detect a
+        // partial migration on next start. `Migration::no_tx` is intentionally
+        // ignored here, matching apply().
+        buf.push_str("START TRANSACTION;\n");
+
+        let _ = write!(
+            buf,
+            "INSERT INTO {table_name} ( version, description, success, checksum, execution_time ) VALUES ( {}, ",
+            migration.version
+        );
+        append_sql_string(buf, &migration.description);
+        buf.push_str(", FALSE, X'");
+        append_hex(buf, &migration.checksum);
+        buf.push_str("', -1 );\n");
+
+        let sql = migration.sql.as_str();
+        buf.push_str(sql);
+        if !sql.ends_with('\n') {
+            buf.push('\n');
+        }
+
+        let _ = writeln!(
+            buf,
+            "UPDATE {table_name} SET success = TRUE WHERE version = {};",
+            migration.version
+        );
+
+        buf.push_str("COMMIT;\n");
+    }
+}
+
 async fn current_database(conn: &mut MySqlConnection) -> Result<String, MigrateError> {
     // language=MySQL
     Ok(query_scalar("SELECT DATABASE()").fetch_one(conn).await?)
