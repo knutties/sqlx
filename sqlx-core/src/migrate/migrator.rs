@@ -294,6 +294,88 @@ impl Migrator {
         Ok(())
     }
 
+    /// Returns the migrations that would be applied if [`run`](Self::run) were called now.
+    ///
+    /// Connects to the database, ensures the migrations table exists, validates that
+    /// previously-applied migrations' checksums still match the current source, and
+    /// returns the remaining "up"-direction migrations in version order.
+    ///
+    /// Useful for build/CI/health-check tooling that wants to detect or react to
+    /// unapplied schema changes without mutating the database.
+    ///
+    /// Returns an error if the database is in a [dirty][MigrateError::Dirty] state
+    /// (a previously-failed partial migration) or if any applied migration's checksum
+    /// has drifted from the current source ([`MigrateError::VersionMismatch`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use sqlx::migrate::MigrateError;
+    /// # fn main() -> Result<(), MigrateError> {
+    /// #     sqlx::__rt::test_block_on(async move {
+    /// use sqlx::migrate::Migrator;
+    /// use sqlx::sqlite::SqlitePoolOptions;
+    ///
+    /// let m = Migrator::new(std::path::Path::new("./migrations")).await?;
+    /// let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await?;
+    /// for migration in m.pending(&pool).await? {
+    ///     eprintln!("pending: {} ({})", migration.version, migration.description);
+    /// }
+    /// # Ok(())
+    /// #     })
+    /// # }
+    /// ```
+    pub async fn pending<'a, A>(&self, migrator: A) -> Result<Vec<&Migration>, MigrateError>
+    where
+        A: Acquire<'a>,
+        <A::Connection as Deref>::Target: Migrate,
+    {
+        let mut conn = migrator.acquire().await?;
+        self.pending_direct(&mut *conn).await
+    }
+
+    /// Like [`pending`](Self::pending) but takes a borrowed connection directly.
+    ///
+    /// Mirrors the relationship between [`run`](Self::run) and
+    /// [`run_direct`](Self::run_direct).
+    #[doc(hidden)]
+    pub async fn pending_direct<C>(&self, conn: &mut C) -> Result<Vec<&Migration>, MigrateError>
+    where
+        C: Migrate,
+    {
+        conn.ensure_migrations_table(&self.table_name).await?;
+
+        if let Some(version) = conn.dirty_version(&self.table_name).await? {
+            return Err(MigrateError::Dirty(version));
+        }
+
+        let applied_migrations = conn.list_applied_migrations(&self.table_name).await?;
+        validate_applied_migrations(&applied_migrations, self)?;
+
+        let applied_migrations: HashMap<_, _> = applied_migrations
+            .into_iter()
+            .map(|m| (m.version, m))
+            .collect();
+
+        let mut pending = Vec::new();
+        for migration in self.iter() {
+            if migration.migration_type.is_down_migration() {
+                continue;
+            }
+
+            match applied_migrations.get(&migration.version) {
+                Some(applied_migration) => {
+                    if migration.checksum != applied_migration.checksum {
+                        return Err(MigrateError::VersionMismatch(migration.version));
+                    }
+                }
+                None => pending.push(migration),
+            }
+        }
+
+        Ok(pending)
+    }
+
     /// Run down migrations against the database until a specific version.
     ///
     /// # Examples

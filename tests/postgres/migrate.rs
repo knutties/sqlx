@@ -130,6 +130,31 @@ async fn no_tx(mut conn: PoolConnection<Postgres>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[sqlx::test(migrations = false)]
+async fn pending(mut conn: PoolConnection<Postgres>) -> anyhow::Result<()> {
+    clean_up(&mut conn).await?;
+
+    let migrator = Migrator::new(Path::new("tests/postgres/migrations_simple")).await?;
+    let total = migrator.iter().count();
+    assert!(total >= 2, "test fixture changed");
+
+    // Initial: every migration is pending, in version order.
+    let pending: Vec<_> = migrator
+        .pending(&mut conn)
+        .await?
+        .into_iter()
+        .map(|m| m.version)
+        .collect();
+    let all_versions: Vec<_> = migrator.iter().map(|m| m.version).collect();
+    assert_eq!(pending, all_versions);
+
+    // After run: nothing pending.
+    migrator.run(&mut conn).await?;
+    assert!(migrator.pending(&mut conn).await?.is_empty());
+
+    Ok(())
+}
+
 /// Ensure that we have a clean initial state.
 async fn clean_up(conn: &mut PgConnection) -> anyhow::Result<()> {
     conn.execute("DROP DATABASE IF EXISTS test_db").await.ok();
